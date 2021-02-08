@@ -1,0 +1,6 @@
+{
+  "dataset": "Kaggle2014Pred",
+  "datadir": "../Kaggle_data",
+  "cachedir": ".cache/Kaggle2014Pred",
+  "resultdir": ".results"
+}
