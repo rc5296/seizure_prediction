@@ -3,224 +3,209 @@ import numpy as np
 import sklearn.metrics as metrics
 import matplotlib.pyplot as plt
 
-# import keras
+import tensorflow as tf
 import tensorflow.keras as keras
-from keras.models import Sequential, Model
-from keras.layers import add, concatenate, Input
-from keras.layers.core import Dense, Dropout, Activation, Flatten, Lambda, Reshape, Permute
-from keras.layers.convolutional import Convolution2D, MaxPooling2D, Conv3D, MaxPooling3D
-from keras.layers.recurrent import GRU, LSTM
-from keras.layers.advanced_activations import ELU
-from keras.layers.normalization import BatchNormalization
 from keras.utils import np_utils
-from keras.optimizers import SGD,Adam,Adagrad,Adadelta,RMSprop
-from keras.callbacks import EarlyStopping, ModelCheckpoint
-from keras.constraints import max_norm
-from keras import backend as K
+from keras.layers.core import Dense, Dropout, Activation, Flatten, Lambda
+from keras.layers.convolutional import Convolution2D, MaxPooling2D
+from keras.layers.normalization import BatchNormalization
 
-from models.customCallbacks import MyEarlyStopping, MyModelCheckpoint
+from models.stn import SequenceTransformer, STFT
 
 class ConvNN(object):
-	def __init__(self,target,batch_size=16,nb_classes=2,epochs=2,mode='cv'):
-		self.target = target
-		self.batch_size = batch_size
-		self.nb_classes = nb_classes
-		self.epochs = epochs
-		self.mode = mode
+    def __init__(self, target, batch_size=16, nb_classes=2, epochs=2, mode='base'):
+        self.target = target
+        self.batch_size = batch_size
+        self.nb_classes = nb_classes
+        self.epochs = epochs
+        self.mode = mode
 
-	def setup(self,X_train_shape):
-		print ('X_train shape', X_train_shape)
-		# Input shape = (None,1,22,59,114)
-		inputs = Input(shape=X_train_shape[1:])
+    def setup(self, X_train_shape):
+        print('X_train shape', X_train_shape)
 
-		normal1 = BatchNormalization(
-			# axis=2,
-			axis=1,
-			name='normal1')(inputs)
+        inputs = keras.layers.Input(shape=X_train_shape[1:])
 
-		# conv1 = Conv3D(
-		# 	16,
-		# 	kernel_size=(X_train_shape[2], 5, 5),
-		# 	padding='valid',strides=(1,2,2),
-		# 	name='conv1')(normal1)
-		conv1 = Convolution2D(16, (5, 5), padding='valid', strides=(2,2), name='conv1')(normal1)
+        if self.mode == 'stn':
+            x, theta_phi = SequenceTransformer('stn')(inputs)
+            layer = STFT()(x)
+        else:
+            layer = inputs
 
-		relu1 = Activation('relu')(conv1)
+        # Tensors should have dimension (N, C, F, T) at this point
+        # C = channels, F = frequency, T = time
+        normal1 = BatchNormalization(axis=1, name='normal1')(layer)
+        conv1 = Convolution2D(16, (5, 5), padding='valid', strides=(2, 2), name='conv1')(normal1)
+        relu1 = Activation('relu')(conv1)
+        pool1 = MaxPooling2D(pool_size=(2, 2))(relu1)
 
-		# pool1 = MaxPooling3D(
-		# 	pool_size=(1,2,2),
-		# 	padding='same')(relu1)
-		pool1 = MaxPooling2D(pool_size=(2,2))(relu1)
+        normal2 = BatchNormalization(axis=1, name='normal2')(pool1)
+        conv2 = Convolution2D(32, (3, 3), padding='same', strides=(1, 1), name='conv2')(normal2)
+        relu2 = Activation('relu')(conv2)
+        pool2 = MaxPooling2D(pool_size=(2, 2))(relu2)
 
-		# ts = int(np.round(np.floor((X_train_shape[3]-4)/2) / 2 + 0.1))
-		# fs = int(np.round(np.floor((X_train_shape[4]-4)/2) / 2 + 0.1))
+        normal3 = BatchNormalization(axis=1, name='normal3')(pool2)
+        conv3 = Convolution2D(64, (3, 3), padding='same', strides=(1, 1), name='conv3')(normal3)
+        relu3 = Activation('relu')(conv3)
+        pool3 = MaxPooling2D(pool_size=(2, 2))(relu3)
 
-		# reshape1 = Reshape((16,ts,fs))(pool1)
-		# o_shape = pool1.shape
-		# reshape1 = Reshape((o_shape[1], o_shape[3], o_shape[4]))(pool1)
+        flat = Flatten()(pool3)
 
-		# normal2 = BatchNormalization(axis=1, name='normal2')(reshape1)
-		normal2 = BatchNormalization(axis=1, name='normal2')(pool1)
+        drop1 = Dropout(0.5)(flat)
+        dens1 = Dense(128, activation='sigmoid', name='dens1')(drop1)
+        drop2 = Dropout(0.5)(dens1)
+        dens2 = Dense(self.nb_classes, name='dens2')(drop2)
 
-		conv2 = Convolution2D(32, (3, 3),
-							  padding='same',strides=(1,1), name='conv2')(normal2)
-		relu2 = Activation('relu')(conv2)
-		pool2 = MaxPooling2D(pool_size=(2,2))(relu2)
+        last = Activation('softmax')(dens2)
 
-		normal3 = BatchNormalization(axis=1, name='normal3')(pool2)
+        self.model = keras.models.Model(inputs=inputs, outputs=last)
+        adam = keras.optimizers.Adam('clipnorm', lr=1e-5, beta_1=0.9, beta_2=0.999, epsilon=1e-7)
+        self.model.compile(loss='binary_crossentropy',
+                           optimizer=adam,
+                           metrics=['accuracy', keras.metrics.AUC()])
 
-		conv3 = Convolution2D(64, (3, 3),
-							  padding='same',strides=(1,1), name='conv3')(normal3)
-		relu3 = Activation('relu')(conv3)
-		pool3 = MaxPooling2D(pool_size=(2,2))(relu3)
+        print(self.model.summary())
+        return self
 
-		flat = Flatten()(pool3)
+    def fit(self, X_train, Y_train, X_val, y_val, save_model=False, load_model=False):
+        Y_train = Y_train.astype('uint8')
+        Y_train = np_utils.to_categorical(Y_train, self.nb_classes)
+        y_val = np_utils.to_categorical(y_val, self.nb_classes)
 
-		drop1 = Dropout(0.5)(flat)
+        # callbacks
+        cb = []
+        # Create a callback for early stopping based on validation loss
+        early_stop = keras.callbacks.EarlyStopping(monitor="val_loss", patience=10)
+        cb.append(early_stop)
 
-		dens1 = Dense(128, activation='sigmoid', name='dens1')(drop1)
-		drop2 = Dropout(0.5)(dens1)
+        if save_model:
+            # os.remove('{}_{}.ckpt'.format(self.target, self.mode))
+            # Create a callback that saves the model's weights
+            ckpt_callback = keras.callbacks.ModelCheckpoint(filepath='{}_{}.ckpt'.format(self.target, self.mode),
+                                                            save_weights_only=True,
+                                                            monitor='val_loss',
+                                                            mode='min',
+                                                            save_best_only=True)
+            cb.append(ckpt_callback)
 
-		dens2 = Dense(self.nb_classes, name='dens2')(drop2)
+        self.model.fit(X_train,
+                       Y_train,
+                       batch_size=self.batch_size,
+                       epochs=self.epochs,
+                       validation_data=(X_val, y_val),
+                       callbacks=cb,
+                       verbose=2)
 
-		# option to include temperature in softmax
-		temp = 1.0
-		temperature = Lambda(lambda x: x / temp)(dens2)
-		last = Activation('softmax')(temperature)
+        if load_model:
+            self.model.load_weights('{}_{}.ckpt'.format(self.target, self.mode))
 
-		self.model = Model(inputs=inputs, outputs=last)
+        return self
 
-		adam = Adam(lr=3e-4, beta_1=0.9, beta_2=0.999, epsilon=1e-7)
-		self.model.compile(loss='categorical_crossentropy',
-					  optimizer=adam,
-					  metrics=['accuracy'])
+    def predict_proba(self, X):
+        return self.model.predict([X])
 
-		print (self.model.summary())
-		return self
+    def evaluate(self, X, y, k_out_of_n=(6, 8), plot_roc=False):
+        predictions = self.model.predict(X, verbose=0)
+
+        auc_test = metrics.roc_auc_score(y, predictions[:, 1])
+        print('Test AUC is:{}'.format(auc_test))
+
+        # Plot ROC curve
+        if plot_roc:
+            fpr, tpr, threshold = metrics.roc_curve(y, predictions[:,1])
+            roc_auc = metrics.auc(fpr, tpr)
+            plt.title('Receiver Operating Characteristic (Patient 1, Seizure   )')
+            plt.plot(fpr, tpr, 'b', label='AUC = {:.2f}'.format(roc_auc))
+            plt.legend(loc='lower right')
+            plt.plot([0,1], [0,1], 'r--')
+            plt.xlim([0,1])
+            plt.ylim([0,1])
+            plt.ylabel('True Positive Rate')
+            plt.xlabel('False Positive Rate')
+            plt.show()
+
+        class_predict = np.argmax(predictions, axis=1)
+        pos_idx = np.nonzero(y == 1)
+        neg_idx = np.nonzero(y == 0)
+
+        true_pos = getTruePos(class_predict[pos_idx], k_out_of_n)
+        false_pos = getFalsePos(class_predict[neg_idx], k_out_of_n)
+
+        return auc_test, true_pos, false_pos, class_predict
 
 
-	def fit(self,X_train,Y_train,X_val=None, y_val=None):
-		Y_train = Y_train.astype('uint8')
-		Y_train = np_utils.to_categorical(Y_train, self.nb_classes)
-		y_val = np_utils.to_categorical(y_val, self.nb_classes)
+def getTruePos(predictions, k_out_of_n):
+    """
+    Check if the model correctly predicted a seizure. Model must make "k-out-of-n" correct predictions on
+    the preictal data clips. Assumes that leave-one-out cross validation is used i.e. only preictal data
+    of one seizure is input.
 
-		# early_stop = MyEarlyStopping(patience=10, verbose=0)
-		early_stop = keras.callbacks.EarlyStopping(monitor="val_loss", patience=10)
-		checkpointer = MyModelCheckpoint(
-			filepath="weights_%s_%s.h5" %(self.target, self.mode),
-			verbose=0, save_best_only=True)
+    :param predictions: Predictions made by the model for preictal data clips of one seizure
+    :param k_out_of_n: Tuple (k,n) for "k-out-of-n" method of determining alarm
+    :return: Returns 1 if the model correctly predicted a seizure. Returns 0 otherwise
+    """
+    count = 0
+    j = 0
+    nArr = []
+
+    for i in range(len(predictions)):
+        if count < k_out_of_n[1]:
+            nArr.append(predictions[i])
+            count += 1
+            if sum(nArr) >= k_out_of_n[0]:  # sound alarm
+                return 1
+
+        else:
+            nArr[j] = predictions[i]
+            if sum(nArr) >= k_out_of_n[0]:  # sound alarm
+                return 1
+            j = (j + 1) % k_out_of_n[1]
+
+    return 0
 
 
-		if (y_val is None):
-			self.model.fit(X_train, Y_train, batch_size=self.batch_size,
-						   epochs=self.epochs,validation_split=0.2,
-						   callbacks=[early_stop,checkpointer], verbose=2
-						   )
-		else:
-			self.model.fit(X_train, Y_train, batch_size=self.batch_size,
-						   epochs=self.epochs,validation_data=(X_val,y_val),
-						   callbacks=[early_stop,checkpointer], verbose=2
-						   )
-		self.model.load_weights("weights_%s_%s.h5" %(self.target, self.mode))
-		if self.mode == 'cv':
-			os.remove("weights_%s_%s.h5" %(self.target, self.mode))
-		return self
+def getFalsePos(predictions, k_out_of_n):
+    """
+    Count how many false alarms the model made. Note: interictal
+    clips may not be in sequential order, so "k-out-of-n" is an approximation in this case.
 
-	def load_trained_weights(self, filename):
-		self.model.load_weights(filename)
-		print ('Loading pre-trained weights from %s.' %filename)
-		return self
+    :param predictions: Predictions made by the model for interictal data clips
+    :param k_out_of_n: Tuple (k,n) for "k-out-of-n" method of determining alarm
+    :return: Returns the number of false alarms
+    """
+    alarm = False
+    disabledClips = 69  # amount of time the alarm lasts for, where time=(disabledCLips + 1)*clipLength
+    disableCount = 0
+    fpos = 0
+    count = 0
+    j = 0
+    nArr = []
 
-	def predict_proba(self,X):
-		return self.model.predict([X])
+    for i in range(len(predictions)):
+        if not alarm:
+            if count < k_out_of_n[1]:
+                nArr.append(predictions[i])
+                count += 1
+                if sum(nArr) >= k_out_of_n[0]:  # sound alarm
+                    fpos += 1
+                    alarm = True
 
-	def evaluate(self, X, y):
-		predictions = self.model.predict(X, verbose=0)
+            else:
+                nArr[j] = predictions[i]
+                if sum(nArr) >= k_out_of_n[0]:  # sound alarm
+                    fpos += 1
+                    alarm = True
 
-		auc_test = metrics.roc_auc_score(y, predictions[:,1])
-		# fpr, tpr, threshold = metrics.roc_curve(y, predictions[:,1])
-		# roc_auc = metrics.auc(fpr, tpr)
-		# plt.title('Receiver Operating Characteristic (Patient 1, Seizure   )')
-		# plt.plot(fpr, tpr, 'b', label='AUC = {:.2f}'.format(roc_auc))
-		# plt.legend(loc='lower right')
-		# plt.plot([0,1], [0,1], 'r--')
-		# plt.xlim([0,1])
-		# plt.ylim([0,1])
-		# plt.ylabel('True Positive Rate')
-		# plt.xlabel('False Positive Rate')
-		# plt.show()
-		print('Test AUC is:{}'.format(auc_test))
+                j = (j + 1) % k_out_of_n[1]
 
-		class_predict = np.argmax(predictions, axis=1)
-		pos_idx = np.nonzero(y == 1)
-		neg_idx = np.nonzero(y == 0)
+        # re-enable alarm after alarm period
+        elif disableCount == disabledClips:
+            disableCount = 0
+            count = 0
+            nArr = []
+            j = 0
+            alarm = False
 
-		threshold = (6,8)
-		true_pos = getTruePos(class_predict[pos_idx], y[pos_idx], threshold)
-		false_pos = getFalsePos(class_predict[neg_idx], y[neg_idx], threshold)
+        else:
+            disableCount += 1
 
-		return auc_test, true_pos, false_pos, class_predict
-
-def getTruePos(predictions, actual, threshold):
-	"""
-
-	:param predictions:
-	:param actual:
-	:param threshold: Tuple (k,n) for "k-of-n" method of determining alarm
-	"""
-	count = 0
-	j = 0
-	nArr = []
-
-	for i in range(len(predictions)):
-		if count < threshold[1]:
-			nArr.append(predictions[i])
-			count += 1
-			if sum(nArr) >= threshold[0]: # sound alarm
-				return 1
-
-		else:
-			nArr[j] = predictions[i]
-			if sum(nArr) >= threshold[0]: # sound alarm
-				return 1
-			j = (j + 1) % threshold[1]
-
-	return 0
-
-def getFalsePos(predictions, actual, threshold):
-	alarm = False
-	disabledClips = 69 # amount of time the alarm lasts for, set to n where time=n*clipLength - 1
-	disableCount = 0
-	fpos = 0
-	count = 0
-	j = 0
-	nArr = []
-
-	for i in range(len(predictions)):
-		if not alarm:
-			if count < threshold[1]:
-				nArr.append(predictions[i])
-				count += 1
-				if sum(nArr) >= threshold[0]:  # sound alarm
-					fpos += 1
-					alarm = True
-
-			else:
-				nArr[j] = predictions[i]
-				if sum(nArr) >= threshold[0]:  # sound alarm
-					fpos += 1
-					alarm = True
-
-				j = (j + 1) % threshold[1]
-
-		elif disableCount == disabledClips:
-			disableCount = 0
-			count = 0
-			nArr = []
-			j = 0
-			alarm = False
-
-		else:
-			disableCount += 1
-
-	return fpos
+    return fpos

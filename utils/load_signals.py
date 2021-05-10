@@ -85,14 +85,94 @@ class PrepData():
                     raise Exception("file %s not found" % filepath)
                 done = True
 
+    def load_signals_CHBMIT(data_dir, target, data_type):
+        print('load_signals_CHBMIT for Patient', target)
+        # from mne.io import RawArray, read_raw_edf
+        # from mne.channels import read_montage
+        # from mne import create_info, concatenate_raws, pick_types
+        # from mne.filter import notch_filter
+
+        onset = pd.read_csv(os.path.join(data_dir, 'seizure_summary.csv'), header=0)
+        # print (onset)
+        osfilenames, szstart, szstop = onset['File_name'], onset['Seizure_start'], onset['Seizure_stop']
+        osfilenames = list(osfilenames)
+        # print ('Seizure files:', osfilenames)
+
+        segment = pd.read_csv(os.path.join(data_dir, 'segmentation.csv'), header=None)
+        nsfilenames = list(segment[segment[1] == 0][0])
+
+        nsdict = {
+            '0': []
+        }
+        targets = [
+            '1',
+            '2',
+            '3',
+            '4',
+            '5',
+            '6',
+            '7',
+            '8',
+            '9',
+            '10',
+            '11',
+            '12',
+            '13',
+            '14',
+            '15',
+            '16',
+            '17',
+            '18',
+            '19',
+            '20',
+            '21',
+            '22',
+            '23'
+        ]
+        for t in targets:
+            nslist = [elem for elem in nsfilenames if
+                      elem.find('chb%s_' % t) != -1 or
+                      elem.find('chb0%s_' % t) != -1 or
+                      elem.find('chb%sa_' % t) != -1 or
+                      elem.find('chb%sb_' % t) != -1 or
+                      elem.find('chb%sc_' % t) != -1]
+            nsdict[t] = nslist
+        # nsfilenames = shuffle(nsfilenames, random_state=0)
+
+        special_interictal = pd.read_csv(os.path.join(data_dir, 'special_interictal.csv'), header=None)
+        sifilenames, sistart, sistop = special_interictal[0], special_interictal[1], special_interictal[2]
+        sifilenames = list(sifilenames)
+
+        def strcv(i):
+            if i < 10:
+                return '0' + str(i)
+            elif i < 100:
+                return str(i)
+
+        strtrg = 'chb' + strcv(int(target))
+        dir = os.path.join(data_dir, strtrg)
+        text_files = [f for f in os.listdir(dir) if f.endswith('.edf')]
+        # print (target,strtrg)
+        print(text_files)
+
+        if data_type == 'ictal':
+            filenames = [filename for filename in text_files if filename in osfilenames]
+            # print ('ictal files', filenames)
+        elif data_type == 'interictal':
+            filenames = [filename for filename in text_files if filename in nsdict[target]]
+            # print ('interictal files', filenames)
+
+        totalfiles = len(filenames)
+        print('Total %s files %d' % (data_type, totalfiles))
+
     def read_raw_signal(self):
         '''Load EEG data from raw files. Calls separate helper functions for each dataset.'''
 
-        # if self.settings['dataset'] == 'CHBMIT':
-        #     self.samp_freq = 256
-        #     self.freq = 256
-        #     self.global_proj = np.array([0.0]*114)
-        #     return load_signals_CHBMIT(self.settings['datadir'], self.target, self.type)
+        if self.settings['dataset'] == 'CHBMIT':
+            self.samp_freq = 256
+            self.freq = 256
+            self.global_proj = np.array([0.0]*114)
+            return self.load_signals_CHBMIT(self.settings['datadir'], self.target, self.phase)
 
         # elif self.settings['dataset'] == 'FB':
         #     self.samp_freq = 256
@@ -130,6 +210,8 @@ class PrepData():
 
         perFile = extraClips // len(self.phaseFiles)
         data = self._eegGenerator()
+
+        print('Generating {} extra clips...'.format(perFile * len(self.phaseFiles)))
 
         X, y = self.preprocess(data, perFile)
         return X, y
@@ -216,27 +298,36 @@ class PrepData():
             xVals[sequence] = np.asarray(xVals[sequence])
             y[sequence] = np.asarray(y[sequence])
 
-        return [freqs, times, xVals], y
+        # return [freqs, times, xVals], y
+        return xVals, y
 
     def _stft_process(self, eegData, sampFreq, clip=0):
         powerFreq = 60
         f, t, Zxx = stft(eegData, sampFreq, window='hann', nperseg=512, axis=-1)
 
-        # plot before
-        temp = np.log(np.abs(Zxx[0, :, :]))+1e-6
-        plt.pcolormesh(t, f, temp, shading='gouraud', cmap='inferno', vmax=9, vmin=-4.5) # use this for human
-        # plt.pcolormesh(t, f, np.log(np.abs(Zxx[0, :, :])) + 1e-6, shading='gouraud', cmap='inferno')
-        # plt.title('STFT Magnitude before removal (clip {})'.format(clip))
-        plt.ylabel('Frequency [Hz]')
-        plt.xlabel('Time [sec]')
-        plt.colorbar()
-        plt.show()
-
-        # remove DC (0 Hz) and power line harmonics (+/- 3 Hz)
+        # # plot before
+        # if self.phase == 'interictal':
+        #     temp = np.log(np.abs(Zxx[0, :, :]))+1e-6
+        #     # plt.pcolormesh(t, f, temp, shading='gouraud', cmap='inferno', vmax=9, vmin=-4.5) # use this for human
+        #     plt.pcolormesh(t, f, np.log(np.abs(Zxx[0, :, :])) + 1e-6, shading='flat', vmax=2.5, vmin=-7.5)
+        #     # plt.title('STFT Magnitude before removal (clip {})'.format(clip))
+        #     plt.ylabel('Frequency [Hz]')
+        #     plt.xlabel('Time [sec]')
+        #     plt.colorbar()
+        #     plt.title('Interictal (Dog 5)')
+        #     plt.show()
+        """
+        # remove DC (0 Hz) and delta band ( <= 4Hz)
+        noise = np.where(np.logical_and(0 <= f, f <= 4))
+        f = np.delete(f, noise)
+        Zxx = np.delete(Zxx, noise, axis=1)
+        """
         Zxx = Zxx[:, 1:, :]
-        line_noise_freq = []
         # nBins = len(f)
         f = f[1:]
+
+        # remove power line harmonics (+/- 3 Hz)
+        line_noise_freq = []
         for i in range(int(np.max(f) / powerFreq)):
             harmonic = (i+1)*powerFreq
             lower = harmonic - 3
@@ -250,20 +341,51 @@ class PrepData():
             Zxx = np.delete(Zxx, noise, axis=1)
 
         # print('Removed {} frequency bins'.format(nBins - len(f)))
+        """
+        # Spectral Power and ratios of spectral power
+        Zxx = np.square(np.abs(Zxx))        # squared magnitude of fft ~ PSD estimate
+        bands = {'theta' : [4,8],
+                 'alpha' : [8,13],
+                 'beta' : [13,30],
+                 'gamma1' : [30,50],
+                 'gamma2' : [50,70],
+                 'gamma3': [70, 90],
+                 'gamma4': [90, 110],
+                 'gamma5': [110, 128],
+                }
+        P = [] # spectral power
+        for band, rng in bands.items():
+            band_idx = np.logical_and(rng[0] < f, f <= rng[1])
+            P.append(np.log(np.sum(Zxx[:,band_idx,:], axis=1)))
+
+        R = [] # ratio of spectral powers
+        for i in range(len(P) - 1):
+            for j in range(i+1, len(P)):
+                R.append(np.subtract(P[i], P[j]))
+
+        Q = [] # relative spectral power
+        W = np.log(np.sum(Zxx, axis=1))
+        for i in range(len(P)):
+            Q.append(np.subtract(P[i], W))
+
+        features = np.stack(P+R+Q, axis=1)
+        """
         # other transformations
         Zxx = np.log(np.abs(Zxx)) + 1e-6
+        features = Zxx
 
-        # plot stft for channel 0
-        # plt.pcolormesh(t, f, Zxx[0,:,:], shading='gouraud', cmap='inferno', vmin=-4.5, vmax=9) # use this for human
+        # # plot stft for channel 0
+        # # plt.pcolormesh(t, f, Zxx[0,:,:], shading='gouraud', cmap='inferno', vmin=-4.5, vmax=9) # use this for human
         # plt.pcolormesh(t, f, Zxx[0, :, :], shading='gouraud', cmap='inferno')
         # plt.title('STFT Magnitude (clip {})'.format(clip))
         # plt.ylabel('Frequency [Hz]')
         # plt.xlabel('Time [sec]')
         # plt.colorbar()
         # plt.show()
-        self.broken_axis_plot(t, f, Zxx, line_noise_freq)
 
-        return f, t, Zxx
+        # self.broken_axis_plot(t, f, Zxx, line_noise_freq)
+
+        return f, t, features
 
     def cacheData(self, X, y):
         filename = '{self.phase}_{self.target}.hkl'.format(self=self)  # e.g. ictal_Patient_1.hkl
