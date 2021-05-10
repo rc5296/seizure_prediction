@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 
 import hickle as hkl
-from utils.group_seizure_Kaggle2014Pred import group_seizure
 
 class PrepData():
     def __init__(self, target, type, settings, clipTarget=None):
